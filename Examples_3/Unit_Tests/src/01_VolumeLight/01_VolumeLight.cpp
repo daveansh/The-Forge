@@ -91,11 +91,14 @@ Semaphore* pRenderCompleteSemaphores[gBackBufferImageCount] = { NULL };
 
 ICameraController* pCameraController = NULL;
 Sampler* pSamplerSkyBox = NULL;
+Sampler* pSamplerRaymarch = NULL;
 Texture* pSkyBoxTextures[6];
 Shader*  pSkyBoxDrawShader = NULL;
 Shader*  pCubeDrawShader = NULL;
 Shader*  pRaymarchShader = NULL;
-RootSignature* pRootSignature = NULL;
+RootSignature* pSkyboxRootSignature = NULL;
+RootSignature* pCubeDrawRootSignature = NULL;
+RootSignature* pRaymarchRootSignature = NULL;
 DescriptorBinder* pDescriptorBinder = NULL;
 RasterizerState* pSkyboxRast = NULL;
 BlendState* pBlendStateAdditive = NULL;
@@ -109,6 +112,7 @@ RenderTarget* pDepthBuffer = NULL;
 RenderTarget* pOcclusionPrePass = NULL;
 Pipeline* pSkyBoxDrawPipeline = NULL;
 Pipeline* pCubeDrawPipeline = NULL;
+Pipeline* pRaymarchDrawPipeline = NULL;
 UniformBlock gUniformDataSky;
 UniformBlockCube gUniformDataCube;
 uint32_t gFrameIndex = 0;
@@ -219,20 +223,31 @@ bool VolumeLight::Init()
   samplerDesc.mMinFilter = FILTER_LINEAR;
   samplerDesc.mMagFilter = FILTER_LINEAR;
   addSampler(pRenderer, &samplerDesc, &pSamplerSkyBox);
+  addSampler(pRenderer, &samplerDesc, &pSamplerRaymarch);
 
-  // Todo: What is this doing exactly??
+  // Todo: What is this doing exactly?? CreateRootSignatures and descriptor binder.
   {
-    Shader* shaders[] = { pRaymarchShader ,pCubeDrawShader, pSkyBoxDrawShader };
-    const char* pStaticSamplers[] = { "uSampler0" };
+    //Shader* shaders[] = { pRaymarchShader ,pCubeDrawShader, pSkyBoxDrawShader };
+    const char* pStaticSamplersNames[] = {"uSampler0", "uSampler1"};
+    Sampler* pSamplers[] = {pSamplerSkyBox, pSamplerRaymarch};
+    uint32_t numStaticSamplers = sizeof(pSamplers) / sizeof(pSamplers[0]);
+
     RootSignatureDesc rootDesc = {};
-    rootDesc.mStaticSamplerCount = 1;
-    rootDesc.ppStaticSamplers = &pSamplerSkyBox;
-    rootDesc.mShaderCount = 3;
-    rootDesc.ppShaders = shaders;
-    rootDesc.ppStaticSamplerNames = pStaticSamplers;
-    addRootSignature(pRenderer, &rootDesc, &pRootSignature);
-    DescriptorBinderDesc descriptorBinderDesc[2] = { { pRootSignature }, {pRootSignature} };
-    addDescriptorBinder(pRenderer, 0, 2, descriptorBinderDesc, &pDescriptorBinder);
+    rootDesc.mStaticSamplerCount = numStaticSamplers;
+    rootDesc.ppStaticSamplers = pSamplers;
+    rootDesc.ppStaticSamplerNames = pStaticSamplersNames;
+    rootDesc.mShaderCount = 1;
+    rootDesc.ppShaders = &pSkyBoxDrawShader;
+    addRootSignature(pRenderer, &rootDesc, &pSkyboxRootSignature);
+
+    rootDesc.ppShaders = &pCubeDrawShader;
+    addRootSignature(pRenderer, &rootDesc, &pCubeDrawRootSignature);
+
+    rootDesc.ppShaders = &pRaymarchShader;
+    addRootSignature(pRenderer, &rootDesc, &pRaymarchRootSignature);
+
+    DescriptorBinderDesc descriptorBinderDesc[3] = { { pSkyboxRootSignature }, {pCubeDrawRootSignature}, {pRaymarchRootSignature} };
+    addDescriptorBinder(pRenderer, 0, 3, descriptorBinderDesc, &pDescriptorBinder);
   }
 
   // Skybox rasterizer state.
@@ -246,7 +261,8 @@ bool VolumeLight::Init()
   blendStateDesc.mBlendModes[0] = BM_ADD;
   blendStateDesc.mSrcFactors[0] = BC_ONE;
   blendStateDesc.mDstFactors[0] = BC_ONE;
-  blendStateDesc.mMasks[0] = 1; // Blend mask for the first target.
+  blendStateDesc.mMasks[0] = ALL;
+  blendStateDesc.mRenderTargetMask = BLEND_STATE_TARGET_0;
   addBlendState(pRenderer, &blendStateDesc, &pBlendStateAdditive);
 
   // skybox depth state.
@@ -413,13 +429,13 @@ bool VolumeLight::Load()
   pipelineSettings.mSampleCount = pSwapChain->ppSwapchainRenderTargets[0]->mDesc.mSampleCount;
   pipelineSettings.mSampleQuality = pSwapChain->ppSwapchainRenderTargets[0]->mDesc.mSampleQuality;
   pipelineSettings.mDepthStencilFormat = pDepthBuffer->mDesc.mFormat;
-  pipelineSettings.pRootSignature = pRootSignature;
+  pipelineSettings.pRootSignature = pSkyboxRootSignature;
   pipelineSettings.pShaderProgram = pSkyBoxDrawShader;
   pipelineSettings.pRasterizerState = pSkyboxRast;
   pipelineSettings.pVertexLayout = &vertexLayout;
   addPipeline(pRenderer, &desc, &pSkyBoxDrawPipeline);
 
-  // Vertex buffer layout for cube shader.
+  // Vertex buffer layout and pipeline for cube shader.
   vertexLayout.mAttribCount = 2;
   vertexLayout.mAttribs[0].mSemantic = SEMANTIC_POSITION;
   vertexLayout.mAttribs[0].mFormat = ImageFormat::RGB32F;
@@ -437,9 +453,25 @@ bool VolumeLight::Load()
   pipelineSettings.pShaderProgram = pCubeDrawShader;
   pipelineSettings.pDepthState = pDepth;
   pipelineSettings.pColorFormats = formats;
+  pipelineSettings.pRootSignature = pCubeDrawRootSignature;
   pipelineSettings.pSrgbValues = srgbformats;
   pipelineSettings.mRenderTargetCount = 2;
   addPipeline(pRenderer, &desc, &pCubeDrawPipeline);
+
+  // Pipeline for raymarch pass.
+  pipelineSettings.pShaderProgram = pRaymarchShader;
+  pipelineSettings.mRenderTargetCount = 1;
+  pipelineSettings.pRootSignature = pRaymarchRootSignature;
+  pipelineSettings.pDepthState = NULL;
+  pipelineSettings.pColorFormats = &pSwapChain->ppSwapchainRenderTargets[0]->mDesc.mFormat;
+  pipelineSettings.pSrgbValues = &pSwapChain->ppSwapchainRenderTargets[0]->mDesc.mSrgb;
+  pipelineSettings.mSampleCount = pSwapChain->ppSwapchainRenderTargets[0]->mDesc.mSampleCount;
+  pipelineSettings.mSampleQuality = pSwapChain->ppSwapchainRenderTargets[0]->mDesc.mSampleQuality;
+  pipelineSettings.mDepthStencilFormat = ImageFormat::NONE;
+  pipelineSettings.pVertexLayout = NULL;
+  pipelineSettings.pBlendState = pBlendStateAdditive;
+  addPipeline(pRenderer, &desc, &pRaymarchDrawPipeline);
+
 
   return true;
 }
@@ -568,7 +600,7 @@ void VolumeLight::Draw()
   params[5].ppTextures = &pSkyBoxTextures[4];
   params[6].pName = "BackText";
   params[6].ppTextures = &pSkyBoxTextures[5];
-  cmdBindDescriptors(cmd, pDescriptorBinder, pRootSignature, 7, params);
+  cmdBindDescriptors(cmd, pDescriptorBinder, pSkyboxRootSignature, 7, params);
   cmdBindVertexBuffer(cmd, 1, &pSkyBoxVertexBuffer, NULL);
   cmdDraw(cmd, 36, 0);
   cmdEndGpuTimestampQuery(cmd, pGpuProfiler);
@@ -582,14 +614,31 @@ void VolumeLight::Draw()
   cmdBeginGpuTimestampQuery(cmd, pGpuProfiler, "Draw Cubes", true);
   cmdBindPipeline(cmd, pCubeDrawPipeline);
   params[0].ppBuffers = &pCubeUniformBuffer[gFrameIndex];
-  cmdBindDescriptors(cmd, pDescriptorBinder, pRootSignature, 1, params);
+  cmdBindDescriptors(cmd, pDescriptorBinder, pCubeDrawRootSignature, 1, params);
   cmdBindVertexBuffer(cmd, 1, &pCubeVertexBuffer, NULL);
   cmdDrawInstanced(cmd, gNumCubePoints / 6, 0, gNumCubes, 0);
   cmdEndGpuTimestampQuery(cmd, pGpuProfiler);
 
-  cmdBeginGpuTimestampQuery(cmd, pGpuProfiler, "Draw UI", true);
-  static HiresTimer gTimer;
-  gTimer.GetUSec(true);
+  // Draw Raymarch. 
+  // todo: Is there a better way of doing this?
+  {
+    // Unbind the second render target from last pass.
+    cmdBindRenderTargets(cmd, 0, NULL, NULL, NULL, NULL, NULL, -1, -1);
+
+    barriers[0] = { pOcclusionPrePass->pTexture, RESOURCE_STATE_SHADER_RESOURCE };
+    cmdResourceBarrier(cmd, 0, NULL, 1, barriers, false);
+
+    // Re-bind only the main-back target again.
+    cmdBindRenderTargets(cmd, 1, &pRenderTarget, NULL, &loadActions, NULL, NULL, -1, -1);
+  }
+
+  cmdBeginGpuTimestampQuery(cmd, pGpuProfiler, "Draw Raymarch", true);
+  cmdBindPipeline(cmd, pRaymarchDrawPipeline);
+  params[0].pName = "OcclusionTexture";
+  params[0].ppTextures = &pOcclusionPrePass->pTexture;
+  cmdBindDescriptors(cmd, pDescriptorBinder, pRaymarchRootSignature, 1, params);
+  cmdDraw(cmd, 3, 0); // Just a fullscreen pass.
+  cmdEndGpuTimestampQuery(cmd, pGpuProfiler);
 
   // todo: Is there a better way of doing this?
   {
@@ -598,6 +647,9 @@ void VolumeLight::Draw()
     // Re-bind only the main-back target again.
     cmdBindRenderTargets(cmd, 1, &pRenderTarget, pDepthBuffer, &loadActions, NULL, NULL, -1, -1);
   }
+  cmdBeginGpuTimestampQuery(cmd, pGpuProfiler, "Draw UI", true);
+  static HiresTimer gTimer;
+  gTimer.GetUSec(true);
 
   gAppUI.DrawText(cmd, float2(8, 15), eastl::string().sprintf("CPU %f ms", gTimer.GetUSecAverage() / 1000.0f).c_str(), &gFrameTimeDraw);
 
