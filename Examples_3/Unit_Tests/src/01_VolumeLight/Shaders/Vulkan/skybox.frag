@@ -96,7 +96,7 @@ void main(void)
       
        newtextcoord = (fs_in.texcoord.xy)/20+vec2(0.5);
        newtextcoord = vec2(1-newtextcoord.x,1-newtextcoord.y);
-       fs_out_color = texture(sampler2D(BackText, uSampler0), newtextcoord);
+       fs_out_color = vec4(1.0,1.0,1.0,1.0);//texture(sampler2D(BackText, uSampler0), newtextcoord);
   }
   
 }

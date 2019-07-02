@@ -1,5 +1,3 @@
-#version 450 core
-
 /*
  * Copyright (c) 2018-2019 Confetti Interactive Inc.
  * 
@@ -24,36 +22,13 @@
  * under the License.
 */
 
+#version 450 core
 
-#define MAX_PLANETS 20
+layout (location = 0) out vec4 UV;
 
-layout(location = 0) in vec4 vs_in_position;
 
-layout (std140, set=0, binding=0) uniform uniformBlock{
-	uniform mat4 viewProject;
-};
-
-out gl_PerVertex
+void main()
 {
-  vec4 gl_Position;
-
-};
-
-layout(location = 0) out INVOCATION
-{
-  vec4 texcoord;
-  int side;
-} vs_out;
-
-
-void main(void)
-{
-  vec4 p = vec4(vs_in_position.xyz,1.0);
-  mat4 m = viewProject;
-  m[3] = vec4(0.0, 0.0, 0.0, 1.0);
-  p = m * p;
-  gl_Position = vec4(p.x, p.y, p.w, p.w);
-  vs_out.texcoord = vs_in_position;
-  vs_out.side = int(vs_in_position.w);
+	UV = vec4((gl_VertexIndex << 1) & 2, gl_VertexIndex & 2, 0, 0);
+	gl_Position = vec4(UV.xy * vec2(2.0f, -2.0f) + vec2(-1.0f, 1.0f), 0.0f, 1.0f);
 }
-

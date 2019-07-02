@@ -24,7 +24,6 @@
 
 /*
  * Unit Test for a screen space volume lighting solution.
- * https://developer.nvidia.com/gpugems/GPUGems3/gpugems3_ch13.html
 */
 
 // Interface
@@ -37,7 +36,6 @@
 #include "../../../../Middleware_3/UI/AppUI.h"
 #include "../../../../Common_3/Renderer/IRenderer.h"
 #include "../../../../Common_3/Renderer/ResourceLoader.h"
-
 #include "../../../../Common_3/OS/Input/InputSystem.h"
 #include "../../../../Common_3/OS/Input/InputMappings.h"
 //Math
@@ -45,13 +43,32 @@
 
 #include "../../../../Common_3/OS/Interfaces/IMemoryManager.h"
 
+#define MAX_CUBE 9
+
 // Const Data.
+const uint32_t gNumCubes = 2;
 const uint32_t gBackBufferImageCount = 3;
-const char* pSkyBoxImageFileNames[] = { "Skybox_right1.png",  "Skybox_left2.png",  "Skybox_top3.png",
-                    "Skybox_bottom4.png", "Skybox_front5.png", "Skybox_back6.png" };
+const char* pSkyBoxImageFileNames[] = { "cloudtop_rt.png",  "cloudtop_lf.png",  "cloudtop_up.png",
+                    "cloudtop_dn.png", "cloudtop_bk.png", "cloudtop_ft.png" };
 struct UniformBlock
 {
   mat4 mProjectView;
+};
+
+struct UniformBlockCube 
+{
+  mat4 mProjectView;
+  mat4 mToWorldMat[MAX_CUBE];
+  vec4 mColor[MAX_CUBE];
+  vec3 mDirLight;
+  vec3 mLightColor;
+};
+
+struct CubeInfoStruct
+{
+  vec4  mColor;
+  mat4  mTranslationMat;
+  mat4  mScaleMat;
 };
 
 // Utils
@@ -76,25 +93,35 @@ ICameraController* pCameraController = NULL;
 Sampler* pSamplerSkyBox = NULL;
 Texture* pSkyBoxTextures[6];
 Shader*  pSkyBoxDrawShader = NULL;
+Shader*  pCubeDrawShader = NULL;
+Shader*  pRaymarchShader = NULL;
 RootSignature* pRootSignature = NULL;
 DescriptorBinder* pDescriptorBinder = NULL;
 RasterizerState* pSkyboxRast = NULL;
+BlendState* pBlendStateAdditive = NULL;
 DepthState* pDepth = NULL;
 Buffer* pSkyBoxVertexBuffer = NULL;
+Buffer* pCubeVertexBuffer = NULL;
 Buffer* pSkyboxUniformBuffer[gBackBufferImageCount] = { NULL };
+Buffer* pCubeUniformBuffer[gBackBufferImageCount] = { NULL };
 SwapChain* pSwapChain = NULL;
 RenderTarget* pDepthBuffer = NULL;
+RenderTarget* pOcclusionPrePass = NULL;
 Pipeline* pSkyBoxDrawPipeline = NULL;
+Pipeline* pCubeDrawPipeline = NULL;
 UniformBlock gUniformDataSky;
+UniformBlockCube gUniformDataCube;
 uint32_t gFrameIndex = 0;
+int gNumCubePoints = 0;
+CubeInfoStruct gCubes[gNumCubes];
 
 const char* pszBases[FSR_Count] = {
-  "../../../src/01_Transformations/",     // FSR_BinShaders
-  "../../../src/01_Transformations/",     // FSR_SrcShaders
+  "../../../src/01_VolumeLight/",         // FSR_BinShaders
+  "../../../src/01_VolumeLight/",         // FSR_SrcShaders
   "../../../UnitTestResources/",          // FSR_Textures
   "../../../UnitTestResources/",          // FSR_Meshes
   "../../../UnitTestResources/",          // FSR_Builtin_Fonts
-  "../../../src/01_Transformations/",     // FSR_GpuConfig
+  "../../../src/01_VolumeLight/",         // FSR_GpuConfig
   "",                                     // FSR_Animation
   "",                                     // FSR_OtherFiles
   "../../../../../Middleware_3/Text/",    // FSR_MIDDLEWARE_TEXT
@@ -112,6 +139,7 @@ public:
   void Draw();
   bool CreateSwapChain();
   bool CreateDepthBuffer();
+  bool CreateOcclusionPrepassBuffer();
   void RecenterCameraView(float maxDistance, vec3 lookAt = vec3(0));
   const char* GetName() { return "01_VolumeLighting"; }
   static bool CameraInputEvent(const ButtonData* data);
@@ -169,7 +197,18 @@ bool VolumeLight::Init()
   skyShader.mStages[0] = { "skybox.vert", NULL, 0, FSR_SrcShaders };
   skyShader.mStages[1] = { "skybox.frag", NULL, 0, FSR_SrcShaders };
 
+  ShaderLoadDesc basicShader = {};
+  basicShader.mStages[0] = { "basic.vert", NULL, 0, FSR_SrcShaders };
+  basicShader.mStages[1] = { "basic.frag", NULL, 0, FSR_SrcShaders };
+
+  ShaderLoadDesc raymarchShader = {};
+  raymarchShader.mStages[0] = { "fullscreen.vert", NULL, 0, FSR_SrcShaders };
+  raymarchShader.mStages[1] = { "lightmarch.frag", NULL, 0, FSR_SrcShaders };
+
+
   addShader(pRenderer, &skyShader, &pSkyBoxDrawShader);
+  addShader(pRenderer, &basicShader, &pCubeDrawShader);
+  addShader(pRenderer, &raymarchShader, &pRaymarchShader);
 
   // Add texture samplers
   SamplerDesc samplerDesc = {};
@@ -181,24 +220,34 @@ bool VolumeLight::Init()
   samplerDesc.mMagFilter = FILTER_LINEAR;
   addSampler(pRenderer, &samplerDesc, &pSamplerSkyBox);
 
-  const char* pStaticSamplers[] = { "uSampler0" };
-  RootSignatureDesc rootDesc = {};
-  rootDesc.mStaticSamplerCount = 1;
-  rootDesc.ppStaticSamplers = &pSamplerSkyBox;
-  rootDesc.mShaderCount = 1;
-  rootDesc.ppShaders = &pSkyBoxDrawShader;
-  rootDesc.ppStaticSamplerNames = pStaticSamplers;
-
-  addRootSignature(pRenderer, &rootDesc, &pRootSignature);
-
-  // Todo: What is this?
-  DescriptorBinderDesc descriptorBinderDesc[1] = { { pRootSignature } };
-  addDescriptorBinder(pRenderer, 0, 1, descriptorBinderDesc, &pDescriptorBinder);
+  // Todo: What is this doing exactly??
+  {
+    Shader* shaders[] = { pRaymarchShader ,pCubeDrawShader, pSkyBoxDrawShader };
+    const char* pStaticSamplers[] = { "uSampler0" };
+    RootSignatureDesc rootDesc = {};
+    rootDesc.mStaticSamplerCount = 1;
+    rootDesc.ppStaticSamplers = &pSamplerSkyBox;
+    rootDesc.mShaderCount = 3;
+    rootDesc.ppShaders = shaders;
+    rootDesc.ppStaticSamplerNames = pStaticSamplers;
+    addRootSignature(pRenderer, &rootDesc, &pRootSignature);
+    DescriptorBinderDesc descriptorBinderDesc[2] = { { pRootSignature }, {pRootSignature} };
+    addDescriptorBinder(pRenderer, 0, 2, descriptorBinderDesc, &pDescriptorBinder);
+  }
 
   // Skybox rasterizer state.
   RasterizerStateDesc rasterizerStateDesc = {};
   rasterizerStateDesc.mCullMode = CULL_MODE_NONE;
   addRasterizerState(pRenderer, &rasterizerStateDesc, &pSkyboxRast);
+
+  BlendStateDesc blendStateDesc = {};
+  blendStateDesc.mIndependentBlend = false;
+  blendStateDesc.mAlphaToCoverage = false;
+  blendStateDesc.mBlendModes[0] = BM_ADD;
+  blendStateDesc.mSrcFactors[0] = BC_ONE;
+  blendStateDesc.mDstFactors[0] = BC_ONE;
+  blendStateDesc.mMasks[0] = 1; // Blend mask for the first target.
+  addBlendState(pRenderer, &blendStateDesc, &pBlendStateAdditive);
 
   // skybox depth state.
   DepthStateDesc depthStateDesc = {};
@@ -207,6 +256,21 @@ bool VolumeLight::Init()
   depthStateDesc.mDepthFunc = CMP_LEQUAL;
   addDepthState(pRenderer, &depthStateDesc, &pDepth);
 
+  // Generate cubes vertex buffers
+  float* pCubePoints = NULL;
+  generateCuboidPoints(&pCubePoints, &gNumCubePoints);
+  uint64_t cubeDataSize = gNumCubePoints * sizeof(float);
+  BufferLoadDesc cubeVbDesc = {};
+  cubeVbDesc.mDesc.mDescriptors = DESCRIPTOR_TYPE_VERTEX_BUFFER;
+  cubeVbDesc.mDesc.mMemoryUsage = RESOURCE_MEMORY_USAGE_GPU_ONLY;
+  cubeVbDesc.mDesc.mSize = cubeDataSize;
+  cubeVbDesc.mDesc.mVertexStride = sizeof(float) * 6;
+  cubeVbDesc.pData = pCubePoints;
+  cubeVbDesc.ppBuffer = &pCubeVertexBuffer;
+  addResource(&cubeVbDesc);
+
+  conf_free(pCubePoints);
+  
   // Generate sky box vertex buffer
   float skyBoxPoints[] = {
     10.0f,  -10.0f, -10.0f, 6.0f,    // -z
@@ -252,7 +316,7 @@ bool VolumeLight::Init()
   // Keep the buffer mapped, data will update every frame.
   ubDesc.mDesc.mFlags = BUFFER_CREATION_FLAG_PERSISTENT_MAP_BIT;
   ubDesc.pData = NULL;
-  
+ 
   // Create multiple ubs' for multi-frame rendering.
   for (uint32_t i = 0; i < gBackBufferImageCount; ++i)
   {
@@ -260,8 +324,28 @@ bool VolumeLight::Init()
     addResource(&ubDesc);
   }
 
+  // Also create UB's for cube rendering.
+  ubDesc.mDesc.mSize = sizeof(UniformBlockCube);
+  // Create multiple ubs' for multi-frame rendering.
+  for (uint32_t i = 0; i < gBackBufferImageCount; ++i)
+  {
+    ubDesc.ppBuffer = &pCubeUniformBuffer[i];
+    addResource(&ubDesc);
+  }
+
   finishResourceLoading();
  
+  vec3 startPoint = vec3(0, 0, 0);
+  float scale = 20.f;
+  // Setup the cubes here.
+  for (uint i = 0; i < gNumCubes; ++i) 
+  {
+    gCubes[i].mColor = vec4(0.9f, 0.6f, 0.1f, 1.0f);
+    gCubes[i].mTranslationMat = mat4::translation(startPoint);
+    startPoint[0] += scale + 5.f;
+    gCubes[i].mScaleMat = mat4::scale(vec3(20.0f));
+  }
+
   // Init GUI
   if (!gAppUI.Init(pRenderer))
     return false;
@@ -303,10 +387,13 @@ bool VolumeLight::Load()
   if (!CreateDepthBuffer())
     return false;
 
+  if (!CreateOcclusionPrepassBuffer())
+    return false;
+
   if (!gAppUI.Load(pSwapChain->ppSwapchainRenderTargets))
     return false;
 
-  // Vertex Buffer Layout for Skybox Shader
+  // Vertex buffer layout for skybox shader.
   VertexLayout vertexLayout = {};
   vertexLayout.mAttribCount = 1;
   vertexLayout.mAttribs[0].mSemantic = SEMANTIC_POSITION;
@@ -331,6 +418,29 @@ bool VolumeLight::Load()
   pipelineSettings.pRasterizerState = pSkyboxRast;
   pipelineSettings.pVertexLayout = &vertexLayout;
   addPipeline(pRenderer, &desc, &pSkyBoxDrawPipeline);
+
+  // Vertex buffer layout for cube shader.
+  vertexLayout.mAttribCount = 2;
+  vertexLayout.mAttribs[0].mSemantic = SEMANTIC_POSITION;
+  vertexLayout.mAttribs[0].mFormat = ImageFormat::RGB32F;
+  vertexLayout.mAttribs[0].mBinding = 0;
+  vertexLayout.mAttribs[0].mLocation = 0;
+  vertexLayout.mAttribs[0].mOffset = 0;
+  vertexLayout.mAttribs[1].mSemantic = SEMANTIC_NORMAL;
+  vertexLayout.mAttribs[1].mFormat = ImageFormat::RGB32F;
+  vertexLayout.mAttribs[1].mBinding = 0;
+  vertexLayout.mAttribs[1].mLocation = 1;
+  vertexLayout.mAttribs[1].mOffset = 3 * sizeof(float);
+
+  ImageFormat::Enum formats[2] = { pSwapChain->ppSwapchainRenderTargets[0]->mDesc.mFormat, pOcclusionPrePass->mDesc.mFormat };
+  bool srgbformats[2] = { pSwapChain->ppSwapchainRenderTargets[0]->mDesc.mSrgb, pOcclusionPrePass->mDesc.mSrgb };
+  pipelineSettings.pShaderProgram = pCubeDrawShader;
+  pipelineSettings.pDepthState = pDepth;
+  pipelineSettings.pColorFormats = formats;
+  pipelineSettings.pSrgbValues = srgbformats;
+  pipelineSettings.mRenderTargetCount = 2;
+  addPipeline(pRenderer, &desc, &pCubeDrawPipeline);
+
   return true;
 }
 
@@ -353,15 +463,23 @@ void VolumeLight::Update(float deltaTime)
 
   // Update camera with Time.
   mat4 viewMat = pCameraController->getViewMatrix();
-  
   const float aspectInverse = (float)mSettings.mHeight / (float)mSettings.mWidth;
   const float horizontal_fov = PI / 2.0f;
-
   mat4 projMat = mat4::perspective(horizontal_fov, aspectInverse, 0.1f, 1000.0f);
+
+  // Update the cubes every frame.
+  for (int i = 0; i < gNumCubes; ++i) 
+  {
+    gUniformDataCube.mColor[i] = gCubes[i].mColor;
+    gUniformDataCube.mToWorldMat[i] = gCubes[i].mTranslationMat * gCubes[i].mScaleMat;
+  }
+
+  gUniformDataCube.mDirLight = vec3(0.5, 0.5, 0.5);
+  gUniformDataCube.mLightColor = vec3(1, 1, 1);
+  gUniformDataCube.mProjectView = projMat * viewMat;
 
   // Don't walk out of the sky.
   viewMat.setTranslation(vec3(0));
-
   gUniformDataSky.mProjectView = projMat * viewMat;
 
   // Profiler.
@@ -398,11 +516,14 @@ void VolumeLight::Draw()
   BufferUpdateDesc skyboxViewProjCbv = { pSkyboxUniformBuffer[gFrameIndex], &gUniformDataSky };
   updateResource(&skyboxViewProjCbv);
 
-  // Simply record the screen cleaning command
+  BufferUpdateDesc cubesCbv = { pCubeUniformBuffer[gFrameIndex], &gUniformDataCube };
+  updateResource(&cubesCbv);
+
+  // Simply record the screen cleaning command.
   LoadActionsDesc loadActions = {};
   loadActions.mLoadActionsColor[0] = LOAD_ACTION_CLEAR;
-  loadActions.mClearColorValues[0].r = 1.0f;
-  loadActions.mClearColorValues[0].g = 1.0f;
+  loadActions.mClearColorValues[0].r = 0.0f;
+  loadActions.mClearColorValues[0].g = 0.0f;
   loadActions.mClearColorValues[0].b = 0.0f;
   loadActions.mClearColorValues[0].a = 0.0f;
   loadActions.mLoadActionDepth = LOAD_ACTION_CLEAR;
@@ -414,14 +535,14 @@ void VolumeLight::Draw()
 
   cmdBeginGpuFrameProfile(cmd, pGpuProfiler);
 
-  // Memory barrier for rendertarget and depth target.
+  // Memory barrier for rendertargets and depth target.
   TextureBarrier barriers[] = {
   { pRenderTarget->pTexture, RESOURCE_STATE_RENDER_TARGET },
-  { pDepthBuffer->pTexture, RESOURCE_STATE_DEPTH_WRITE },
+  { pOcclusionPrePass->pTexture, RESOURCE_STATE_RENDER_TARGET},
+  { pDepthBuffer->pTexture, RESOURCE_STATE_DEPTH_WRITE }
   };
 
-  // Only texture barriers.
-  cmdResourceBarrier(cmd, 0, NULL, 2, barriers, false);
+  cmdResourceBarrier(cmd, 0, NULL, 3, barriers, false);
 
   // Bind rendertarget.
   cmdBindRenderTargets(cmd, 1, &pRenderTarget, pDepthBuffer, &loadActions, NULL, NULL, -1, -1);
@@ -452,9 +573,31 @@ void VolumeLight::Draw()
   cmdDraw(cmd, 36, 0);
   cmdEndGpuTimestampQuery(cmd, pGpuProfiler);
 
+  // Draw Cubes.
+  loadActions.mLoadActionsColor[0] = LOAD_ACTION_LOAD;
+  loadActions.mLoadActionsColor[1] = LOAD_ACTION_CLEAR;
+  // Bind the new render-target
+  RenderTarget* pRenderTargetsBound[2] = { pRenderTarget, pOcclusionPrePass };
+  cmdBindRenderTargets(cmd, 2, pRenderTargetsBound, pDepthBuffer, &loadActions, NULL, NULL, -1, -1);
+  cmdBeginGpuTimestampQuery(cmd, pGpuProfiler, "Draw Cubes", true);
+  cmdBindPipeline(cmd, pCubeDrawPipeline);
+  params[0].ppBuffers = &pCubeUniformBuffer[gFrameIndex];
+  cmdBindDescriptors(cmd, pDescriptorBinder, pRootSignature, 1, params);
+  cmdBindVertexBuffer(cmd, 1, &pCubeVertexBuffer, NULL);
+  cmdDrawInstanced(cmd, gNumCubePoints / 6, 0, gNumCubes, 0);
+  cmdEndGpuTimestampQuery(cmd, pGpuProfiler);
+
   cmdBeginGpuTimestampQuery(cmd, pGpuProfiler, "Draw UI", true);
   static HiresTimer gTimer;
   gTimer.GetUSec(true);
+
+  // todo: Is there a better way of doing this?
+  {
+    // Unbind the second render target from last pass.
+    cmdBindRenderTargets(cmd, 0, NULL, NULL, NULL, NULL, NULL, -1, -1);
+    // Re-bind only the main-back target again.
+    cmdBindRenderTargets(cmd, 1, &pRenderTarget, pDepthBuffer, &loadActions, NULL, NULL, -1, -1);
+  }
 
   gAppUI.DrawText(cmd, float2(8, 15), eastl::string().sprintf("CPU %f ms", gTimer.GetUSecAverage() / 1000.0f).c_str(), &gFrameTimeDraw);
 
@@ -507,6 +650,22 @@ bool VolumeLight::CreateDepthBuffer()
   depthRT.mWidth = mSettings.mWidth;
   addRenderTarget(pRenderer, &depthRT, &pDepthBuffer);
   return pDepthBuffer != NULL;
+}
+
+bool VolumeLight::CreateOcclusionPrepassBuffer() 
+{
+  RenderTargetDesc rendertargetdesc = {};
+  rendertargetdesc.mArraySize = 1;
+  rendertargetdesc.mClearValue.r = 0.f;
+  rendertargetdesc.mDepth = 1;
+  rendertargetdesc.mFormat = ImageFormat::R8;
+  rendertargetdesc.mHeight = mSettings.mHeight;
+  rendertargetdesc.mWidth = mSettings.mWidth;
+  rendertargetdesc.mSampleCount = SAMPLE_COUNT_1;
+  rendertargetdesc.mSampleQuality = 0;
+  addRenderTarget(pRenderer, &rendertargetdesc, &pOcclusionPrePass);
+
+  return pOcclusionPrePass != NULL;
 }
 
 void VolumeLight::RecenterCameraView(float maxDistance, vec3 lookAt)
