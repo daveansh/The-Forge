@@ -24,6 +24,7 @@
 
 /*
  * Unit Test for a screen space volume lighting solution.
+ https://developer.nvidia.com/gpugems/GPUGems3/gpugems3_ch13.html
 */
 
 // Interface
@@ -46,7 +47,7 @@
 #define MAX_CUBE 9
 
 // Const Data.
-const uint32_t gNumCubes = 2;
+const uint32_t gNumCubes = 8;
 const uint32_t gBackBufferImageCount = 3;
 const char* pSkyBoxImageFileNames[] = { "cloudtop_rt.png",  "cloudtop_lf.png",  "cloudtop_up.png",
                     "cloudtop_dn.png", "cloudtop_bk.png", "cloudtop_ft.png" };
@@ -69,6 +70,7 @@ struct CubeInfoStruct
   vec4  mColor;
   mat4  mTranslationMat;
   mat4  mScaleMat;
+  vec3  mPos;
 };
 
 // Utils
@@ -79,6 +81,19 @@ GpuProfiler* pGpuProfiler = NULL;
 GuiComponent* pProfilerGui = NULL;
 bool bToggleMicroProfiler = false;
 bool bPrevToggleMicroProfiler = false;
+Vectormath::float2 gSSLightPos = float2(0.5f,0.5f);
+float gExposure = 0.013f;
+float gDecay = 0.3f;
+float gAnimSpeed = 0.05f;
+bool bLockCam = true;
+vec3 gEmptyPosition = {};
+vec3 gNextEmptyPos = {};
+float gCubeDistance = 0.f;
+CubeInfoStruct* gCurrentAnimatedCube = NULL;
+ICameraController* pCameraController = NULL;
+int gNumCubePoints = 0;
+CubeInfoStruct gCubes[gNumCubes];
+
 
 // Graphics.
 Renderer* pRenderer = NULL;
@@ -88,10 +103,7 @@ Cmd** ppCmdBuffers = NULL;
 Fence* pRenderCompleteFences[gBackBufferImageCount] = { NULL };
 Semaphore* pImageAquiredSemaphore = NULL;
 Semaphore* pRenderCompleteSemaphores[gBackBufferImageCount] = { NULL };
-
-ICameraController* pCameraController = NULL;
 Sampler* pSamplerSkyBox = NULL;
-Sampler* pSamplerRaymarch = NULL;
 Texture* pSkyBoxTextures[6];
 Shader*  pSkyBoxDrawShader = NULL;
 Shader*  pCubeDrawShader = NULL;
@@ -112,8 +124,6 @@ Pipeline* pCubeDrawPipeline = NULL;
 Pipeline* pRaymarchDrawPipeline = NULL;
 UniformBlock gUniformData;
 uint32_t gFrameIndex = 0;
-int gNumCubePoints = 0;
-CubeInfoStruct gCubes[gNumCubes];
 
 const char* pszBases[FSR_Count] = {
   "../../../src/01_VolumeLight/",         // FSR_BinShaders
@@ -140,6 +150,9 @@ public:
   bool CreateSwapChain();
   bool CreateDepthBuffer();
   bool CreateOcclusionPrepassBuffer();
+  void AnimateCubes(float deltaTime);
+  void VolumeLight::UpdateAnimation(float deltaTime, bool& bAnimationComplete);
+  CubeInfoStruct* VolumeLight::ChooseNextCube(vec3 endPos);
   void RecenterCameraView(float maxDistance, vec3 lookAt = vec3(0));
   const char* GetName() { return "01_VolumeLighting"; }
   static bool CameraInputEvent(const ButtonData* data);
@@ -204,7 +217,6 @@ bool VolumeLight::Init()
   raymarchShader.mStages[0] = { "fullscreen.vert", NULL, 0, FSR_SrcShaders };
   raymarchShader.mStages[1] = { "lightmarch.frag", NULL, 0, FSR_SrcShaders };
 
-
   addShader(pRenderer, &skyShader, &pSkyBoxDrawShader);
   addShader(pRenderer, &basicShader, &pCubeDrawShader);
   addShader(pRenderer, &raymarchShader, &pRaymarchShader);
@@ -218,9 +230,7 @@ bool VolumeLight::Init()
   samplerDesc.mMinFilter = FILTER_LINEAR;
   samplerDesc.mMagFilter = FILTER_LINEAR;
   addSampler(pRenderer, &samplerDesc, &pSamplerSkyBox);
-  addSampler(pRenderer, &samplerDesc, &pSamplerRaymarch);
 
-  // Todo: Figure out what this does under the hood?? CreateRootSignatures and descriptor binder.
   {
     const char* pStaticSamplersNames[] = {"uSampler0"};
     Sampler* pSamplers[] = {pSamplerSkyBox};
@@ -331,15 +341,26 @@ bool VolumeLight::Init()
   finishResourceLoading();
  
   vec3 startPoint = vec3(0, 0, 0);
+  vec3 position = startPoint;
   float scale = 20.f;
+  gCubeDistance = scale + scale * .25f;;
   // Setup the cubes here.
   for (uint i = 0; i < gNumCubes; ++i) 
   {
+    if (i % 3 == 0 && i != 0)
+    {
+      position[0] = startPoint[0];
+      position[1] -= gCubeDistance;
+    }
     gCubes[i].mColor = vec4(0.9f, 0.6f, 0.1f, 1.0f);
-    gCubes[i].mTranslationMat = mat4::translation(startPoint);
-    startPoint[0] += scale + 5.f;
-    gCubes[i].mScaleMat = mat4::scale(vec3(20.0f));
+    gCubes[i].mTranslationMat = mat4::translation(position);
+    gCubes[i].mScaleMat = mat4::scale(vec3(scale));
+    gCubes[i].mPos = position;
+    position[0] += gCubeDistance;
   }
+
+  // Empty position.
+  gEmptyPosition = position;
 
   // Init GUI
   if (!gAppUI.Init(pRenderer))
@@ -351,14 +372,18 @@ bool VolumeLight::Init()
   GuiDesc guiDesc = {};
   float   dpiScale = getDpiScale().x;
   guiDesc.mStartSize = vec2(140.0f / dpiScale, 320.0f / dpiScale);
-  guiDesc.mStartPosition = vec2(mSettings.mWidth - guiDesc.mStartSize.getX() * 1.1f, guiDesc.mStartSize.getY() * 0.5f);
-  pProfilerGui = gAppUI.AddGuiComponent("Micro profiler", &guiDesc);
+  guiDesc.mStartPosition = vec2(mSettings.mWidth - guiDesc.mStartSize.getX() * 10.f, guiDesc.mStartSize.getY() * 0.5f);
+  pProfilerGui = gAppUI.AddGuiComponent("01_VolumeLight", &guiDesc);
   pProfilerGui->AddWidget(CheckboxWidget("Toggle Micro Profiler", &bToggleMicroProfiler));
-
+  pProfilerGui->AddWidget(SliderFloat2Widget("SSLightPosition", &gSSLightPos, 0.0f, 1.0f));
+  pProfilerGui->AddWidget(SliderFloatWidget("Exposure", &gExposure, 0.0f, 0.2f, 0.000999f));
+  pProfilerGui->AddWidget(SliderFloatWidget("RayLength", &gDecay, 0.02f, 0.4f, 0.000999f));
+  pProfilerGui->AddWidget(SliderFloatWidget("AnimationSpeed(FPSBased)", &gAnimSpeed, 0.02f, 1.f, 0.000999f));
+  pProfilerGui->AddWidget(CheckboxWidget("LockCamera", &bLockCam));
   // Create FpsCameraController with following properties.
   CameraMotionParameters cmp{ 160.0f, 600.0f, 200.0f };
-  vec3                   camPos{ 48.0f, 48.0f, 20.0f };
-  vec3                   lookAt{ 0 };
+  vec3                   camPos{ 25.0f, -25.0f, -100.0f };
+  vec3                   lookAt{ 25, -25, 0 };
 
   pCameraController = createFpsCameraController(camPos, lookAt);
   requestMouseCapture(true);
@@ -372,6 +397,50 @@ bool VolumeLight::Init()
 
 void VolumeLight::Exit()
 {
+  waitQueueIdle(pGraphicsQueue);
+
+  destroyCameraController(pCameraController);
+
+  gAppUI.Exit();
+
+  // Exit profile
+  exitProfiler(pRenderer);
+
+  for (uint32_t i = 0; i < gBackBufferImageCount; ++i)
+  {
+    removeResource(pUniformBuffer[i]);
+  }
+  removeResource(pCubeVertexBuffer);
+  removeResource(pSkyBoxVertexBuffer);
+  
+  for (uint i = 0; i < 6; ++i)
+    removeResource(pSkyBoxTextures[i]);
+
+  removeDescriptorBinder(pRenderer, pDescriptorBinder);
+  removeSampler(pRenderer, pSamplerSkyBox);
+  removeShader(pRenderer, pCubeDrawShader);
+  removeShader(pRenderer, pSkyBoxDrawShader);
+  removeShader(pRenderer, pRaymarchShader);
+  removeRootSignature(pRenderer, pRootSignature);
+
+  removeDepthState(pDepth);
+  removeRasterizerState(pSkyboxRast);
+  removeBlendState(pBlendStateAdditive);
+
+  for (uint32_t i = 0; i < gBackBufferImageCount; ++i)
+  {
+    removeFence(pRenderer, pRenderCompleteFences[i]);
+    removeSemaphore(pRenderer, pRenderCompleteSemaphores[i]);
+  }
+  removeSemaphore(pRenderer, pImageAquiredSemaphore);
+
+  removeCmd_n(pCmdPool, gBackBufferImageCount, ppCmdBuffers);
+  removeCmdPool(pRenderer, pCmdPool);
+
+  removeGpuProfiler(pRenderer, pGpuProfiler);
+  removeResourceLoaderInterface(pRenderer);
+  removeQueue(pGraphicsQueue);
+  removeRenderer(pRenderer);
 }
 
 bool VolumeLight::Load()
@@ -402,7 +471,7 @@ bool VolumeLight::Load()
   GraphicsPipelineDesc& pipelineSettings = desc.mGraphicsDesc;
   pipelineSettings.mPrimitiveTopo = PRIMITIVE_TOPO_TRI_LIST;
   pipelineSettings.mRenderTargetCount = 1;
-  pipelineSettings.pDepthState = NULL;
+  pipelineSettings.pDepthState = pDepth;
   pipelineSettings.pColorFormats = &pSwapChain->ppSwapchainRenderTargets[0]->mDesc.mFormat;
   pipelineSettings.pSrgbValues = &pSwapChain->ppSwapchainRenderTargets[0]->mDesc.mSrgb;
   pipelineSettings.mSampleCount = pSwapChain->ppSwapchainRenderTargets[0]->mDesc.mSampleCount;
@@ -416,7 +485,6 @@ bool VolumeLight::Load()
 
   // Pipeline for raymarch pass.
   pipelineSettings.pShaderProgram = pRaymarchShader;
-  pipelineSettings.mDepthStencilFormat = ImageFormat::NONE;
   pipelineSettings.pVertexLayout = NULL;
   pipelineSettings.pBlendState = pBlendStateAdditive;
   addPipeline(pRenderer, &desc, &pRaymarchDrawPipeline);
@@ -451,6 +519,17 @@ bool VolumeLight::Load()
 
 void VolumeLight::Unload()
 {
+  waitQueueIdle(pGraphicsQueue);
+
+  gAppUI.Unload();
+
+  removePipeline(pRenderer, pSkyBoxDrawPipeline);
+  removePipeline(pRenderer, pCubeDrawPipeline);
+  removePipeline(pRenderer, pRaymarchDrawPipeline);
+
+  removeSwapChain(pRenderer, pSwapChain);
+  removeRenderTarget(pRenderer, pDepthBuffer);
+  removeRenderTarget(pRenderer, pOcclusionPrePass);
 }
 
 void VolumeLight::Update(float deltaTime)
@@ -461,7 +540,8 @@ void VolumeLight::Update(float deltaTime)
     RecenterCameraView(170.0f);
   }
 
-  pCameraController->update(deltaTime);
+  if(!bLockCam)
+    pCameraController->update(deltaTime);
 
   static float currentTime = 0.0f;
   currentTime += deltaTime * 1000.0f; //??
@@ -471,6 +551,8 @@ void VolumeLight::Update(float deltaTime)
   const float aspectInverse = (float)mSettings.mHeight / (float)mSettings.mWidth;
   const float horizontal_fov = PI / 2.0f;
   mat4 projMat = mat4::perspective(horizontal_fov, aspectInverse, 0.1f, 1000.0f);
+  
+  AnimateCubes(deltaTime);
 
   // Update the cubes every frame.
   for (int i = 0; i < gNumCubes; ++i) 
@@ -483,12 +565,10 @@ void VolumeLight::Update(float deltaTime)
   gUniformData.mProjectView = projMat * viewMat;
 
   // Update raymarch pass data.
-  gUniformData.mExposure = 0.035f;
-  gUniformData.mDecay = 0.2f;
-  vec4 lightPos = projMat * viewMat * (mat4::translation(vec3(25, 35, 0)) * vec4(0, 0, 0, 1));
-  gUniformData.mSSLight = vec2(0.4f, 0.8f);//vec2(lightPos[0] / lightPos[3], lightPos[1] / lightPos[3]);
+  gUniformData.mExposure = gExposure;
+  gUniformData.mDecay = gDecay;
+  gUniformData.mSSLight = vec2(gSSLightPos.x, gSSLightPos.y);
   
-
   // Don't walk out of the sky.
   viewMat.setTranslation(vec3(0));
   gUniformData.mProjectViewSky = projMat * viewMat;
@@ -505,6 +585,59 @@ void VolumeLight::Update(float deltaTime)
   }
 
   gAppUI.Update(deltaTime);
+}
+
+void VolumeLight::UpdateAnimation(float deltaTime, bool& bAnimationComplete)
+{
+  static float t = 0.f;
+
+  if (bAnimationComplete == false) 
+  {
+    gCurrentAnimatedCube->mPos = lerp(gCurrentAnimatedCube->mPos, gEmptyPosition, t);
+    gCurrentAnimatedCube->mTranslationMat = mat4::translation(gCurrentAnimatedCube->mPos);
+    t += gAnimSpeed * deltaTime;
+
+    if (length(gEmptyPosition - gCurrentAnimatedCube->mPos) <= 0.01f)
+    {
+      t = 0.f;
+      gCurrentAnimatedCube->mPos[0] = roundf(gCurrentAnimatedCube->mPos[0]);
+      gCurrentAnimatedCube->mPos[1] = roundf(gCurrentAnimatedCube->mPos[1]);
+      gCurrentAnimatedCube->mPos[2] = roundf(gCurrentAnimatedCube->mPos[2]);
+      gEmptyPosition = gNextEmptyPos;
+      gCurrentAnimatedCube = NULL;
+      bAnimationComplete = true;
+    }
+  }
+
+
+
+}
+
+CubeInfoStruct* VolumeLight::ChooseNextCube(vec3 endPos)
+{
+  CubeInfoStruct* adjCubes[4] = {};
+  uint index = 0;
+  for (int i = 0; i < gNumCubes; ++i)
+  {
+    vec3 pos = gCubes[i].mPos;
+    if (length(endPos - pos) <= gCubeDistance)
+      adjCubes[index++] = &gCubes[i];
+  }
+
+  return adjCubes[rand() % index];
+}
+
+void VolumeLight::AnimateCubes(float deltaTime) 
+{
+  static bool bAnimationComplete = true;
+  UpdateAnimation(deltaTime, bAnimationComplete);
+  if (bAnimationComplete == true) 
+  {
+    gCurrentAnimatedCube = ChooseNextCube(gEmptyPosition);
+    gNextEmptyPos = gCurrentAnimatedCube->mPos;
+    bAnimationComplete = false;
+  }
+
 }
 
 void VolumeLight::Draw()
@@ -530,6 +663,7 @@ void VolumeLight::Draw()
   // Simply record the screen cleaning command.
   LoadActionsDesc loadActions = {};
   loadActions.mLoadActionsColor[0] = LOAD_ACTION_CLEAR;
+  loadActions.mLoadActionsColor[1] = LOAD_ACTION_CLEAR;
   loadActions.mClearColorValues[0].r = 0.0f;
   loadActions.mClearColorValues[0].g = 0.0f;
   loadActions.mClearColorValues[0].b = 0.0f;
@@ -553,17 +687,18 @@ void VolumeLight::Draw()
   cmdResourceBarrier(cmd, 0, NULL, 3, barriers, false);
 
   // Bind rendertarget.
-  cmdBindRenderTargets(cmd, 1, &pRenderTarget, pDepthBuffer, &loadActions, NULL, NULL, -1, -1);
+  RenderTarget* pRenderTargetsBound[2] = { pRenderTarget, pOcclusionPrePass };
+  cmdBindRenderTargets(cmd, 2, pRenderTargetsBound, pDepthBuffer, &loadActions, NULL, NULL, -1, -1);
   cmdSetViewport(cmd, 0.0f, 0.0f, (float)pRenderTarget->mDesc.mWidth, (float)pRenderTarget->mDesc.mHeight, 0.0f, 1.0f);
   cmdSetScissor(cmd, 0, 0, pRenderTarget->mDesc.mWidth, pRenderTarget->mDesc.mHeight);
 
-  // Draw Skybox.
-  cmdBeginGpuTimestampQuery(cmd, pGpuProfiler, "Draw skybox", true);
-  cmdBindPipeline(cmd, pSkyBoxDrawPipeline);
+  // Draw Cubes.
+  cmdBeginGpuTimestampQuery(cmd, pGpuProfiler, "Draw cubes", true);
+  cmdBindPipeline(cmd, pCubeDrawPipeline);
 
   DescriptorData params[8] = {};
   params[0].pName = "OcclusionTexture";
-  params[0].ppTextures = &pSkyBoxTextures[0];
+  params[0].ppTextures = &pSkyBoxTextures[0]; //Placeholder, re-bind later.
   params[1].pName = "uniformBlock";
   params[1].ppBuffers = &pUniformBuffer[gFrameIndex];
   params[2].pName = "RightText";
@@ -579,54 +714,48 @@ void VolumeLight::Draw()
   params[7].pName = "BackText";
   params[7].ppTextures = &pSkyBoxTextures[5];
   cmdBindDescriptors(cmd, pDescriptorBinder, pRootSignature, 8, params);
-  cmdBindVertexBuffer(cmd, 1, &pSkyBoxVertexBuffer, NULL);
-  cmdDraw(cmd, 36, 0);
-  cmdEndGpuTimestampQuery(cmd, pGpuProfiler);
-
-  // Draw Cubes.
-  loadActions.mLoadActionsColor[0] = LOAD_ACTION_LOAD;
-  loadActions.mLoadActionsColor[1] = LOAD_ACTION_CLEAR;
-  // Bind the new render-target
-  RenderTarget* pRenderTargetsBound[2] = { pRenderTarget, pOcclusionPrePass };
-  cmdBindRenderTargets(cmd, 2, pRenderTargetsBound, pDepthBuffer, &loadActions, NULL, NULL, -1, -1);
-  cmdBeginGpuTimestampQuery(cmd, pGpuProfiler, "Draw Cubes", true);
-  cmdBindPipeline(cmd, pCubeDrawPipeline);
   cmdBindVertexBuffer(cmd, 1, &pCubeVertexBuffer, NULL);
   cmdDrawInstanced(cmd, gNumCubePoints / 6, 0, gNumCubes, 0);
   cmdEndGpuTimestampQuery(cmd, pGpuProfiler);
 
-  // Draw Raymarch. 
-  // todo: Is there a better way of doing this?
-  {
-    // Unbind the second render target from last pass.
-    cmdBindRenderTargets(cmd, 0, NULL, NULL, NULL, NULL, NULL, -1, -1);
+  // Draw Skybox.
+  loadActions.mLoadActionsColor[0] = LOAD_ACTION_LOAD;
+  loadActions.mLoadActionDepth = LOAD_ACTION_LOAD;
 
+  // Unbind the second render-target. This also creates a new renderpass, perhaps subpass would be better.
+  {
+    cmdBindRenderTargets(cmd, 0, NULL, NULL, NULL, NULL, NULL, -1, -1);
     barriers[0] = { pOcclusionPrePass->pTexture, RESOURCE_STATE_SHADER_RESOURCE };
     cmdResourceBarrier(cmd, 0, NULL, 1, barriers, false);
-
-    // Re-bind only the main-back target again.
-    cmdBindRenderTargets(cmd, 1, &pRenderTarget, NULL, &loadActions, NULL, NULL, -1, -1);
+    cmdBindRenderTargets(cmd, 1, &pRenderTarget, pDepthBuffer, &loadActions, NULL, NULL, -1, -1);
   }
+  
+  cmdBeginGpuTimestampQuery(cmd, pGpuProfiler, "Draw skybox", true);
+  cmdBindPipeline(cmd, pSkyBoxDrawPipeline);
+  cmdBindVertexBuffer(cmd, 1, &pSkyBoxVertexBuffer, NULL);
+  cmdDraw(cmd, 36, 0);
+  cmdEndGpuTimestampQuery(cmd, pGpuProfiler);
 
-  cmdBeginGpuTimestampQuery(cmd, pGpuProfiler, "Draw Raymarch", true);
+  // Draw Raymarch.
+  cmdBeginGpuTimestampQuery(cmd, pGpuProfiler, "Draw raymarch", true);
   cmdBindPipeline(cmd, pRaymarchDrawPipeline);
   params[0].ppTextures = &pOcclusionPrePass->pTexture;
   cmdBindDescriptors(cmd, pDescriptorBinder, pRootSignature, 1, params);
   cmdDraw(cmd, 3, 0); // Just a fullscreen pass.
   cmdEndGpuTimestampQuery(cmd, pGpuProfiler);
 
-  {
-    // Unbind the second render target from last pass.
-    cmdBindRenderTargets(cmd, 0, NULL, NULL, NULL, NULL, NULL, -1, -1);
-    // Re-bind only the main-back target again.
-    cmdBindRenderTargets(cmd, 1, &pRenderTarget, pDepthBuffer, &loadActions, NULL, NULL, -1, -1);
-  }
-
-  cmdBeginGpuTimestampQuery(cmd, pGpuProfiler, "Draw UI", true);
+  cmdBeginGpuTimestampQuery(cmd, pGpuProfiler, "Draw ui", true);
   static HiresTimer gTimer;
   gTimer.GetUSec(true);
 
   gAppUI.DrawText(cmd, float2(8, 15), eastl::string().sprintf("CPU %f ms", gTimer.GetUSecAverage() / 1000.0f).c_str(), &gFrameTimeDraw);
+
+#if !defined(__ANDROID__)
+  gAppUI.DrawText(
+    cmd, float2(8, 40), eastl::string().sprintf("GPU %f ms", (float)pGpuProfiler->mCumulativeTime * 1000.0f).c_str(),
+    &gFrameTimeDraw);
+  gAppUI.DrawDebugGpuProfile(cmd, float2(8, 65), pGpuProfiler, NULL);
+#endif
 
   gAppUI.Gui(pProfilerGui);
   cmdDrawProfiler(cmd, static_cast<uint32_t>(mSettings.mWidth), static_cast<uint32_t>(mSettings.mHeight));

@@ -56,7 +56,7 @@ void main()
   const int numSteps = 128;
   const float numDelta = 1.0/128.0;
 
-  vec2 dirToLight = (mSSLight - UV.xy);
+  vec2 dirToLight = (clamp(mSSLight,0.0,1.0) - UV.xy);
   float lenToLight = length(dirToLight);
   dirToLight = normalize(dirToLight);
   float deltaLen = min(maxDeltaLen, lenToLight * numDelta);
