@@ -50,18 +50,18 @@ const uint32_t gNumCubes = 2;
 const uint32_t gBackBufferImageCount = 3;
 const char* pSkyBoxImageFileNames[] = { "cloudtop_rt.png",  "cloudtop_lf.png",  "cloudtop_up.png",
                     "cloudtop_dn.png", "cloudtop_bk.png", "cloudtop_ft.png" };
+
+// One uniform block to avoid re-binding.
 struct UniformBlock
 {
   mat4 mProjectView;
-};
-
-struct UniformBlockCube 
-{
-  mat4 mProjectView;
+  mat4 mProjectViewSky;
   mat4 mToWorldMat[MAX_CUBE];
   vec4 mColor[MAX_CUBE];
   vec3 mDirLight;
-  vec3 mLightColor;
+  vec2 mSSLight;
+  float mExposure;
+  float mDecay;
 };
 
 struct CubeInfoStruct
@@ -96,25 +96,21 @@ Texture* pSkyBoxTextures[6];
 Shader*  pSkyBoxDrawShader = NULL;
 Shader*  pCubeDrawShader = NULL;
 Shader*  pRaymarchShader = NULL;
-RootSignature* pSkyboxRootSignature = NULL;
-RootSignature* pCubeDrawRootSignature = NULL;
-RootSignature* pRaymarchRootSignature = NULL;
+RootSignature* pRootSignature = NULL;
 DescriptorBinder* pDescriptorBinder = NULL;
 RasterizerState* pSkyboxRast = NULL;
 BlendState* pBlendStateAdditive = NULL;
 DepthState* pDepth = NULL;
 Buffer* pSkyBoxVertexBuffer = NULL;
 Buffer* pCubeVertexBuffer = NULL;
-Buffer* pSkyboxUniformBuffer[gBackBufferImageCount] = { NULL };
-Buffer* pCubeUniformBuffer[gBackBufferImageCount] = { NULL };
+Buffer* pUniformBuffer[gBackBufferImageCount] = { NULL };
 SwapChain* pSwapChain = NULL;
 RenderTarget* pDepthBuffer = NULL;
 RenderTarget* pOcclusionPrePass = NULL;
 Pipeline* pSkyBoxDrawPipeline = NULL;
 Pipeline* pCubeDrawPipeline = NULL;
 Pipeline* pRaymarchDrawPipeline = NULL;
-UniformBlock gUniformDataSky;
-UniformBlockCube gUniformDataCube;
+UniformBlock gUniformData;
 uint32_t gFrameIndex = 0;
 int gNumCubePoints = 0;
 CubeInfoStruct gCubes[gNumCubes];
@@ -177,7 +173,6 @@ bool VolumeLight::Init()
     addSemaphore(pRenderer, &pRenderCompleteSemaphores[i]);
   }
 
-
   initResourceLoaderInterface(pRenderer);
 
   // Initialize profiler
@@ -225,28 +220,21 @@ bool VolumeLight::Init()
   addSampler(pRenderer, &samplerDesc, &pSamplerSkyBox);
   addSampler(pRenderer, &samplerDesc, &pSamplerRaymarch);
 
-  // Todo: What is this doing exactly?? CreateRootSignatures and descriptor binder.
+  // Todo: Figure out what this does under the hood?? CreateRootSignatures and descriptor binder.
   {
-    //Shader* shaders[] = { pRaymarchShader ,pCubeDrawShader, pSkyBoxDrawShader };
-    const char* pStaticSamplersNames[] = {"uSampler0", "uSampler1"};
-    Sampler* pSamplers[] = {pSamplerSkyBox, pSamplerRaymarch};
+    const char* pStaticSamplersNames[] = {"uSampler0"};
+    Sampler* pSamplers[] = {pSamplerSkyBox};
     uint32_t numStaticSamplers = sizeof(pSamplers) / sizeof(pSamplers[0]);
-
+    Shader* pShaders[] = { pSkyBoxDrawShader , pCubeDrawShader, pRaymarchShader };
     RootSignatureDesc rootDesc = {};
     rootDesc.mStaticSamplerCount = numStaticSamplers;
     rootDesc.ppStaticSamplers = pSamplers;
     rootDesc.ppStaticSamplerNames = pStaticSamplersNames;
-    rootDesc.mShaderCount = 1;
-    rootDesc.ppShaders = &pSkyBoxDrawShader;
-    addRootSignature(pRenderer, &rootDesc, &pSkyboxRootSignature);
+    rootDesc.mShaderCount = 3;
+    rootDesc.ppShaders = pShaders;
+    addRootSignature(pRenderer, &rootDesc, &pRootSignature);
 
-    rootDesc.ppShaders = &pCubeDrawShader;
-    addRootSignature(pRenderer, &rootDesc, &pCubeDrawRootSignature);
-
-    rootDesc.ppShaders = &pRaymarchShader;
-    addRootSignature(pRenderer, &rootDesc, &pRaymarchRootSignature);
-
-    DescriptorBinderDesc descriptorBinderDesc[3] = { { pSkyboxRootSignature }, {pCubeDrawRootSignature}, {pRaymarchRootSignature} };
+    DescriptorBinderDesc descriptorBinderDesc[] = { { pRootSignature }, {pRootSignature}, {pRootSignature} };
     addDescriptorBinder(pRenderer, 0, 3, descriptorBinderDesc, &pDescriptorBinder);
   }
 
@@ -336,16 +324,7 @@ bool VolumeLight::Init()
   // Create multiple ubs' for multi-frame rendering.
   for (uint32_t i = 0; i < gBackBufferImageCount; ++i)
   {
-    ubDesc.ppBuffer = &pSkyboxUniformBuffer[i];
-    addResource(&ubDesc);
-  }
-
-  // Also create UB's for cube rendering.
-  ubDesc.mDesc.mSize = sizeof(UniformBlockCube);
-  // Create multiple ubs' for multi-frame rendering.
-  for (uint32_t i = 0; i < gBackBufferImageCount; ++i)
-  {
-    ubDesc.ppBuffer = &pCubeUniformBuffer[i];
+    ubDesc.ppBuffer = &pUniformBuffer[i];
     addResource(&ubDesc);
   }
 
@@ -429,11 +408,18 @@ bool VolumeLight::Load()
   pipelineSettings.mSampleCount = pSwapChain->ppSwapchainRenderTargets[0]->mDesc.mSampleCount;
   pipelineSettings.mSampleQuality = pSwapChain->ppSwapchainRenderTargets[0]->mDesc.mSampleQuality;
   pipelineSettings.mDepthStencilFormat = pDepthBuffer->mDesc.mFormat;
-  pipelineSettings.pRootSignature = pSkyboxRootSignature;
+  pipelineSettings.pRootSignature = pRootSignature;
   pipelineSettings.pShaderProgram = pSkyBoxDrawShader;
   pipelineSettings.pRasterizerState = pSkyboxRast;
   pipelineSettings.pVertexLayout = &vertexLayout;
   addPipeline(pRenderer, &desc, &pSkyBoxDrawPipeline);
+
+  // Pipeline for raymarch pass.
+  pipelineSettings.pShaderProgram = pRaymarchShader;
+  pipelineSettings.mDepthStencilFormat = ImageFormat::NONE;
+  pipelineSettings.pVertexLayout = NULL;
+  pipelineSettings.pBlendState = pBlendStateAdditive;
+  addPipeline(pRenderer, &desc, &pRaymarchDrawPipeline);
 
   // Vertex buffer layout and pipeline for cube shader.
   vertexLayout.mAttribCount = 2;
@@ -452,26 +438,13 @@ bool VolumeLight::Load()
   bool srgbformats[2] = { pSwapChain->ppSwapchainRenderTargets[0]->mDesc.mSrgb, pOcclusionPrePass->mDesc.mSrgb };
   pipelineSettings.pShaderProgram = pCubeDrawShader;
   pipelineSettings.pDepthState = pDepth;
+  pipelineSettings.mDepthStencilFormat = pDepthBuffer->mDesc.mFormat;
   pipelineSettings.pColorFormats = formats;
-  pipelineSettings.pRootSignature = pCubeDrawRootSignature;
   pipelineSettings.pSrgbValues = srgbformats;
   pipelineSettings.mRenderTargetCount = 2;
+  pipelineSettings.pVertexLayout = &vertexLayout;
+  pipelineSettings.pBlendState = NULL;
   addPipeline(pRenderer, &desc, &pCubeDrawPipeline);
-
-  // Pipeline for raymarch pass.
-  pipelineSettings.pShaderProgram = pRaymarchShader;
-  pipelineSettings.mRenderTargetCount = 1;
-  pipelineSettings.pRootSignature = pRaymarchRootSignature;
-  pipelineSettings.pDepthState = NULL;
-  pipelineSettings.pColorFormats = &pSwapChain->ppSwapchainRenderTargets[0]->mDesc.mFormat;
-  pipelineSettings.pSrgbValues = &pSwapChain->ppSwapchainRenderTargets[0]->mDesc.mSrgb;
-  pipelineSettings.mSampleCount = pSwapChain->ppSwapchainRenderTargets[0]->mDesc.mSampleCount;
-  pipelineSettings.mSampleQuality = pSwapChain->ppSwapchainRenderTargets[0]->mDesc.mSampleQuality;
-  pipelineSettings.mDepthStencilFormat = ImageFormat::NONE;
-  pipelineSettings.pVertexLayout = NULL;
-  pipelineSettings.pBlendState = pBlendStateAdditive;
-  addPipeline(pRenderer, &desc, &pRaymarchDrawPipeline);
-
 
   return true;
 }
@@ -502,17 +475,23 @@ void VolumeLight::Update(float deltaTime)
   // Update the cubes every frame.
   for (int i = 0; i < gNumCubes; ++i) 
   {
-    gUniformDataCube.mColor[i] = gCubes[i].mColor;
-    gUniformDataCube.mToWorldMat[i] = gCubes[i].mTranslationMat * gCubes[i].mScaleMat;
+    gUniformData.mColor[i] = gCubes[i].mColor;
+    gUniformData.mToWorldMat[i] = gCubes[i].mTranslationMat * gCubes[i].mScaleMat;
   }
 
-  gUniformDataCube.mDirLight = vec3(0.5, 0.5, 0.5);
-  gUniformDataCube.mLightColor = vec3(1, 1, 1);
-  gUniformDataCube.mProjectView = projMat * viewMat;
+  gUniformData.mDirLight = vec3(0.5, 0.5, 0.5);
+  gUniformData.mProjectView = projMat * viewMat;
+
+  // Update raymarch pass data.
+  gUniformData.mExposure = 0.035f;
+  gUniformData.mDecay = 0.2f;
+  vec4 lightPos = projMat * viewMat * (mat4::translation(vec3(25, 35, 0)) * vec4(0, 0, 0, 1));
+  gUniformData.mSSLight = vec2(0.4f, 0.8f);//vec2(lightPos[0] / lightPos[3], lightPos[1] / lightPos[3]);
+  
 
   // Don't walk out of the sky.
   viewMat.setTranslation(vec3(0));
-  gUniformDataSky.mProjectView = projMat * viewMat;
+  gUniformData.mProjectViewSky = projMat * viewMat;
 
   // Profiler.
   if (bToggleMicroProfiler != bPrevToggleMicroProfiler)
@@ -544,12 +523,9 @@ void VolumeLight::Draw()
   RenderTarget* pRenderTarget = pSwapChain->ppSwapchainRenderTargets[gFrameIndex];
   Semaphore*    pRenderCompleteSemaphore = pRenderCompleteSemaphores[gFrameIndex];
 
-  // Update uniform buffers. Todo: Updating uniform buffer resource is not a command?
-  BufferUpdateDesc skyboxViewProjCbv = { pSkyboxUniformBuffer[gFrameIndex], &gUniformDataSky };
+  // Update uniform buffer.
+  BufferUpdateDesc skyboxViewProjCbv = { pUniformBuffer[gFrameIndex], &gUniformData };
   updateResource(&skyboxViewProjCbv);
-
-  BufferUpdateDesc cubesCbv = { pCubeUniformBuffer[gFrameIndex], &gUniformDataCube };
-  updateResource(&cubesCbv);
 
   // Simply record the screen cleaning command.
   LoadActionsDesc loadActions = {};
@@ -585,22 +561,24 @@ void VolumeLight::Draw()
   cmdBeginGpuTimestampQuery(cmd, pGpuProfiler, "Draw skybox", true);
   cmdBindPipeline(cmd, pSkyBoxDrawPipeline);
 
-  DescriptorData params[7] = {};
-  params[0].pName = "uniformBlock";
-  params[0].ppBuffers = &pSkyboxUniformBuffer[gFrameIndex];
-  params[1].pName = "RightText";
-  params[1].ppTextures = &pSkyBoxTextures[0];
-  params[2].pName = "LeftText";
-  params[2].ppTextures = &pSkyBoxTextures[1];
-  params[3].pName = "TopText";
-  params[3].ppTextures = &pSkyBoxTextures[2];
-  params[4].pName = "BotText";
-  params[4].ppTextures = &pSkyBoxTextures[3];
-  params[5].pName = "FrontText";
-  params[5].ppTextures = &pSkyBoxTextures[4];
-  params[6].pName = "BackText";
-  params[6].ppTextures = &pSkyBoxTextures[5];
-  cmdBindDescriptors(cmd, pDescriptorBinder, pSkyboxRootSignature, 7, params);
+  DescriptorData params[8] = {};
+  params[0].pName = "OcclusionTexture";
+  params[0].ppTextures = &pSkyBoxTextures[0];
+  params[1].pName = "uniformBlock";
+  params[1].ppBuffers = &pUniformBuffer[gFrameIndex];
+  params[2].pName = "RightText";
+  params[2].ppTextures = &pSkyBoxTextures[0];
+  params[3].pName = "LeftText";
+  params[3].ppTextures = &pSkyBoxTextures[1];
+  params[4].pName = "TopText";
+  params[4].ppTextures = &pSkyBoxTextures[2];
+  params[5].pName = "BotText";
+  params[5].ppTextures = &pSkyBoxTextures[3];
+  params[6].pName = "FrontText";
+  params[6].ppTextures = &pSkyBoxTextures[4];
+  params[7].pName = "BackText";
+  params[7].ppTextures = &pSkyBoxTextures[5];
+  cmdBindDescriptors(cmd, pDescriptorBinder, pRootSignature, 8, params);
   cmdBindVertexBuffer(cmd, 1, &pSkyBoxVertexBuffer, NULL);
   cmdDraw(cmd, 36, 0);
   cmdEndGpuTimestampQuery(cmd, pGpuProfiler);
@@ -613,8 +591,6 @@ void VolumeLight::Draw()
   cmdBindRenderTargets(cmd, 2, pRenderTargetsBound, pDepthBuffer, &loadActions, NULL, NULL, -1, -1);
   cmdBeginGpuTimestampQuery(cmd, pGpuProfiler, "Draw Cubes", true);
   cmdBindPipeline(cmd, pCubeDrawPipeline);
-  params[0].ppBuffers = &pCubeUniformBuffer[gFrameIndex];
-  cmdBindDescriptors(cmd, pDescriptorBinder, pCubeDrawRootSignature, 1, params);
   cmdBindVertexBuffer(cmd, 1, &pCubeVertexBuffer, NULL);
   cmdDrawInstanced(cmd, gNumCubePoints / 6, 0, gNumCubes, 0);
   cmdEndGpuTimestampQuery(cmd, pGpuProfiler);
@@ -634,19 +610,18 @@ void VolumeLight::Draw()
 
   cmdBeginGpuTimestampQuery(cmd, pGpuProfiler, "Draw Raymarch", true);
   cmdBindPipeline(cmd, pRaymarchDrawPipeline);
-  params[0].pName = "OcclusionTexture";
   params[0].ppTextures = &pOcclusionPrePass->pTexture;
-  cmdBindDescriptors(cmd, pDescriptorBinder, pRaymarchRootSignature, 1, params);
+  cmdBindDescriptors(cmd, pDescriptorBinder, pRootSignature, 1, params);
   cmdDraw(cmd, 3, 0); // Just a fullscreen pass.
   cmdEndGpuTimestampQuery(cmd, pGpuProfiler);
 
-  // todo: Is there a better way of doing this?
   {
     // Unbind the second render target from last pass.
     cmdBindRenderTargets(cmd, 0, NULL, NULL, NULL, NULL, NULL, -1, -1);
     // Re-bind only the main-back target again.
     cmdBindRenderTargets(cmd, 1, &pRenderTarget, pDepthBuffer, &loadActions, NULL, NULL, -1, -1);
   }
+
   cmdBeginGpuTimestampQuery(cmd, pGpuProfiler, "Draw UI", true);
   static HiresTimer gTimer;
   gTimer.GetUSec(true);

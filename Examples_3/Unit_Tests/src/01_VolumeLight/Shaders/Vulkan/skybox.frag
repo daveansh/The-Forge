@@ -36,13 +36,13 @@
 
 
 
-layout (set=0, binding=1) uniform texture2D  RightText;
-layout (set=0, binding=2) uniform texture2D  LeftText;
-layout (set=0, binding=3) uniform texture2D  TopText;
-layout (set=0, binding=4) uniform texture2D  BotText;
-layout (set=0, binding=5) uniform texture2D  FrontText;
-layout (set=0, binding=6) uniform texture2D  BackText;
-layout (set=0, binding=7) uniform sampler   uSampler0;
+layout (set=0, binding=2) uniform texture2D  RightText;
+layout (set=0, binding=3) uniform texture2D  LeftText;
+layout (set=0, binding=4) uniform texture2D  TopText;
+layout (set=0, binding=5) uniform texture2D  BotText;
+layout (set=0, binding=6) uniform texture2D  FrontText;
+layout (set=0, binding=7) uniform texture2D  BackText;
+layout (set=0, binding=8) uniform sampler    uSampler0;
 layout(location = 0) in INVOCATION
 {
   vec4 texcoord;
@@ -96,7 +96,7 @@ void main(void)
       
        newtextcoord = (fs_in.texcoord.xy)/20+vec2(0.5);
        newtextcoord = vec2(1-newtextcoord.x,1-newtextcoord.y);
-       fs_out_color = vec4(1.0,1.0,1.0,1.0);//texture(sampler2D(BackText, uSampler0), newtextcoord);
+       fs_out_color = texture(sampler2D(BackText, uSampler0), newtextcoord);
   }
   
 }

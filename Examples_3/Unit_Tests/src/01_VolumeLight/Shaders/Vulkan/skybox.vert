@@ -25,12 +25,23 @@
 */
 
 
-#define MAX_PLANETS 20
+#define MAX_CUBES 9
 
 layout(location = 0) in vec4 vs_in_position;
 
-layout (std140, set=0, binding=0) uniform uniformBlock{
-	uniform mat4 viewProject;
+layout (std140, set=0, binding=1) uniform uniformBlock {
+	  uniform mat4 mvp;
+    uniform mat4 mProjectViewSky;
+    uniform mat4 toWorld[MAX_CUBES];
+    uniform vec4 color[MAX_CUBES];
+
+    // Directional Light Information
+    uniform vec3 lightDir;
+
+    // Raymarch info
+    uniform vec2 mSSLight;
+    uniform float mExposure;
+    uniform float mDecay;
 };
 
 out gl_PerVertex
@@ -49,7 +60,7 @@ layout(location = 0) out INVOCATION
 void main(void)
 {
   vec4 p = vec4(vs_in_position.xyz,1.0);
-  mat4 m = viewProject;
+  mat4 m = mProjectViewSky;
   m[3] = vec4(0.0, 0.0, 0.0, 1.0);
   p = m * p;
   gl_Position = vec4(p.x, p.y, p.w, p.w);

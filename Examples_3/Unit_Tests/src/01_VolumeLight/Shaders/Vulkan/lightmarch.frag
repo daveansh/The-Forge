@@ -24,45 +24,58 @@
 
 #version 450 core
 
+#define MAX_CUBES 9
+
 layout (location = 0) in vec4 UV;
 layout (location = 0) out vec4 FragColor;
 
 layout (set = 0, binding = 0) uniform texture2D OcclusionTexture;
-layout (set = 0, binding = 1) uniform sampler   uSampler1;
 
-//#define NUM_STEPS = 64;
-//#define NUM_DELTA = 0.015625;
+layout (std140, set = 0, binding = 1) uniform uniformBlock {
+	  uniform mat4 mvp;
+    uniform mat4 mProjectViewSky;
+    uniform mat4 toWorld[MAX_CUBES];
+    uniform vec4 color[MAX_CUBES];
+
+    // Directional Light Information
+    uniform vec3 lightDir;
+
+    // Raymarch info
+    uniform vec2 mSSLight;
+    uniform float mExposure;
+    uniform float mDecay;
+};
+
+layout (set = 0, binding = 8) uniform sampler uSampler0;
+
 
 void main()
 {
-  const float maxDeltaLen = 0.006;
-  const float distDecay = 0.008;
-  const float initDecay = 0.2;
-  const int numSteps = 64;
-  const float numDelta = 1.0/64.0;
+  const float maxDeltaLen = 0.005;
+  const float distDecay = 0.002;
+  const int numSteps = 128;
+  const float numDelta = 1.0/128.0;
 
-  vec2 dirToLight = (vec2(0.4,0.8) - UV.xy);
+  vec2 dirToLight = (mSSLight - UV.xy);
   float lenToLight = length(dirToLight);
   dirToLight = normalize(dirToLight);
   float deltaLen = min(maxDeltaLen, lenToLight * numDelta);
   vec2 rayDelta = dirToLight * deltaLen;
 
   vec2 rayOffset = vec2(0.0 , 0.0);
-  float decay = initDecay;
+  float decay = mDecay;
   float rayIntensity = 0.0;
 
   for(int i = 0; i < numSteps; ++i)
   {
     vec2 sampleLocation = UV.xy + rayOffset;
-    float occluded = texture(sampler2D(OcclusionTexture, uSampler1), sampleLocation).r;
+    float occluded = texture(sampler2D(OcclusionTexture, uSampler0), sampleLocation).r;
 
     rayIntensity += (1.0 - occluded) * decay;
-
     rayOffset += rayDelta;
-
     decay = clamp(decay - distDecay, 0.0, 1.0);
   }
 
-  float col = rayIntensity * 0.15;
-	FragColor = vec4(col,col,col, 1.0);
+  vec3 color = vec3(1.0, 1.0, 1.0) * rayIntensity * mExposure;
+	FragColor = vec4(color, 1.0);
 }

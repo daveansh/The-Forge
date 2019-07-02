@@ -35,14 +35,19 @@ layout(location = 1) in vec4 Normal;
 
 layout(location = 0) out vec4 Color;
 
-layout (std140, set=0, binding=0) uniform uniformBlock {
-	uniform mat4 mvp;
+layout (std140, set=0, binding=1) uniform uniformBlock {
+	  uniform mat4 mvp;
+    uniform mat4 mProjectViewSky;
     uniform mat4 toWorld[MAX_CUBES];
     uniform vec4 color[MAX_CUBES];
 
     // Directional Light Information
     uniform vec3 lightDir;
-    uniform vec3 lightColor;
+
+    // Raymarch info
+    uniform vec2 mSSLight;
+    uniform float mExposure;
+    uniform float mDecay;
 };
 
 void main ()
@@ -54,11 +59,10 @@ void main ()
 	vec4 pos = toWorld[gl_InstanceIndex] * vec4(Position.xyz, 1.0f);
 	
 	float lightIntensity = 1.0f;
-  float quadraticCoeff = 1.2;
   float ambientCoeff = 0.4;
 	
   vec3 baseColor = color[gl_InstanceIndex].xyz;
-  vec3 blendedColor = lightColor * baseColor * lightIntensity;
+  vec3 blendedColor = baseColor * lightIntensity;
   vec3 diffuse = blendedColor * max(dot(normal.xyz, lightDir), 0.0);
   vec3 ambient = baseColor * ambientCoeff;
   Color = vec4(ambient + diffuse, 1.0);
