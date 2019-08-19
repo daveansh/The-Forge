@@ -22,7 +22,7 @@
  * under the License.
 */
 
-//~ Aqueous is a real-time photorealistic ocean rendering library.
+//~ Aqueous is a real-time photo realistic ocean rendering library.
 //~ This file is a unit test that uses Aqueous to create an ocean app.
 
 //Interfaces
@@ -56,6 +56,17 @@ const char* pszBases[FSR_Count] = {
 	"../../../../../Middleware_3/UI/",      // FSR_MIDDLEWARE_UI
 };
 
+const uint32_t gImageCount = 3;
+
+Renderer* pRenderer = NULL;
+Queue*   pGraphicsQueue = NULL;
+CmdPool* pCmdPool = NULL;
+Cmd**    ppCmds = NULL; // Cmd buffers.
+Fence*        pRenderCompleteFences[gImageCount] = { NULL };
+Semaphore*    pRenderCompleteSemaphores[gImageCount] = { NULL };
+Semaphore*    pImageAcquiredSemaphore = NULL;
+GpuProfiler* pGpuProfiler = NULL;
+
 class Ocean: public IApp
 {
 	public:
@@ -65,7 +76,50 @@ class Ocean: public IApp
     void Unload();
     void Update(float deltaTime);
     void Draw();
-    const char* GetName() { return "01_Aqueous"; }
+    const char* GetName() override { return "01_Aqueous"; }
 };
+
+bool Ocean::Init() 
+{
+  RendererDesc settings = { 0 };
+  initRenderer(GetName(), &settings, &pRenderer);
+
+  // Check for init success.
+  if (!pRenderer) 
+  {
+    return false;
+  }
+  
+  // Create a queue and command pool.
+  QueueDesc queueDesc = {};
+
+  // For Vulkan, CMD_POOL_DIRECT is GRAPHICS_QUEUE_BIT
+  queueDesc.mType = CMD_POOL_DIRECT;
+  queueDesc.mFlag = QUEUE_FLAG_INIT_MICROPROFILE;
+
+  addQueue(pRenderer, &queueDesc, &pGraphicsQueue);
+  addCmdPool(pRenderer, pGraphicsQueue, false, &pCmdPool);
+  // Add command buffers.
+  addCmd_n(pCmdPool, false, gImageCount, &ppCmds);
+
+  // Create syncronization resources.
+  for (uint32_t i = 0; i < gImageCount; ++i) 
+  {
+    addFence(pRenderer, &pRenderCompleteFences[i]);
+    addSemaphore(pRenderer, &pRenderCompleteSemaphores[i]);
+  }
+  addSemaphore(pRenderer, &pImageAcquiredSemaphore);
+
+  initResourceLoaderInterface(pRenderer);
+
+  // Initialize profile
+  initProfiler(pRenderer, gImageCount);
+  profileRegisterInput();
+  addGpuProfiler(pRenderer, pGraphicsQueue, &pGpuProfiler, "GpuProfiler");
+
+
+
+}
+
 
 DEFINE_APPLICATION_MAIN(Ocean)
